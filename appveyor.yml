@@ -1,19 +1,38 @@
-image: Visual Studio 2017
-version: 1.0.{build}
-
+version: 2.0.10.{build}
+image: Visual Studio 2019
 configuration: Release
-
+platform: Any CPU
+shallow_clone: true
+assembly_info:
+  patch: true
+  file: '**\AssemblyInfo.*'
+  assembly_version: '{version}'
+  assembly_file_version: '{version}'
+  assembly_informational_version: '{version}'
+environment:
+  PfxPassword:
+    secure: MoBSjfTA4dQsMSor6Lbst6kKjVNAYE5elSDK6+IrR1VhCTz5yAsjBbcUC4L4SAegHKABXov/4VyL+3KtrBS8shCkgAFfSK1j98Yvn5K3JyE=
+clone_script:
+  - cmd: >-
+      git clone -q --branch=%APPVEYOR_REPO_BRANCH% https://github.com/%APPVEYOR_REPO_NAME%.git %APPVEYOR_BUILD_FOLDER%
+      && cd %APPVEYOR_BUILD_FOLDER%
+      && git checkout -qf %APPVEYOR_REPO_COMMIT%
+      && git submodule update --init --recursive
 before_build:
-  - nuget restore
+- ps: >-
+    cd $env:APPVEYOR_BUILD_FOLDER\src\
 
+    nuget restore
 build:
-  project: win-acme.sln
-  verbosity: normal
+  project: '\src\wacs.sln'
+  verbosity: minimal
+after_build:
+- ps: >-
+    cd $env:APPVEYOR_BUILD_FOLDER\build\
 
-artifacts:
-  - path: letsencrypt-win-simple\bin\$(CONFIGURATION)
-    name: win-acme-latest
-    type: zip
+    .\create-artifacts.ps1 $env:APPVEYOR_BUILD_FOLDER $env:APPVEYOR_BUILD_VERSION $env:PfxPassword
 
-cache:
-  - packages -> **\packages.config
+    Get-ChildItem $env:APPVEYOR_BUILD_FOLDER\build\artifacts\ | Foreach-Object {
+        Push-AppveyorArtifact $_.FullName -FileName $_.Name
+    }
+deploy: off
