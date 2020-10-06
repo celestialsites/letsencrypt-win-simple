@@ -1,29 +1,36 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading;
-using Amazon;
+﻿using Amazon;
 using Amazon.Route53;
 using Amazon.Route53.Model;
 using Amazon.Runtime;
 using PKISharp.WACS.Clients.DNS;
+using PKISharp.WACS.Context;
 using PKISharp.WACS.Services;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
 
 namespace PKISharp.WACS.Plugins.ValidationPlugins.Dns
 {
-    internal sealed class Route53 : DnsValidation<Route53Options, Route53>
+    internal sealed class Route53 : DnsValidation<Route53>
     {
         private readonly IAmazonRoute53 _route53Client;
 
-        public Route53(LookupClientProvider dnsClient, ILogService log, Route53Options options, string identifier)
-            : base(dnsClient, log, options, identifier)
+        public Route53(
+            LookupClientProvider dnsClient,
+            ILogService log,
+            ProxyService proxy,
+            ISettingsService settings,
+            Route53Options options) : base(dnsClient, log, settings)
         {
             var region = RegionEndpoint.USEast1;
+            var config = new AmazonRoute53Config() { RegionEndpoint = region };
+            config.SetWebProxy(proxy.GetWebProxy());
             _route53Client = !string.IsNullOrWhiteSpace(options.IAMRole)
-                ? new AmazonRoute53Client(new InstanceProfileAWSCredentials(options.IAMRole), region)
+                ? new AmazonRoute53Client(new InstanceProfileAWSCredentials(options.IAMRole), config)
                 : !string.IsNullOrWhiteSpace(options.AccessKeyId) && !string.IsNullOrWhiteSpace(options.SecretAccessKey.Value)
-                    ? new AmazonRoute53Client(options.AccessKeyId, options.SecretAccessKey.Value, region)
-                    : new AmazonRoute53Client(region);
+                    ? new AmazonRoute53Client(options.AccessKeyId, options.SecretAccessKey.Value, config)
+                    : new AmazonRoute53Client(config);
         }
 
         private static ResourceRecordSet CreateResourceRecordSet(string name, string value)
@@ -32,79 +39,103 @@ namespace PKISharp.WACS.Plugins.ValidationPlugins.Dns
             {
                 Name = name,
                 Type = RRType.TXT,
-                ResourceRecords = new List<ResourceRecord> { new ResourceRecord("\"" + value + "\"") },
+                ResourceRecords = new List<ResourceRecord> {
+                    new ResourceRecord("\"" + value + "\"") },
                 TTL = 1L
             };
         }
 
-        public override void CreateRecord(string recordName, string token)
+        public override async Task<bool> CreateRecord(DnsValidationRecord record)
         {
-            var hostedZoneId = GetHostedZoneId(recordName);
-
-            if (hostedZoneId == null)
-                return;
-
-            _log.Information($"Creating TXT record {recordName} with value {token}");
-
-            var response = _route53Client.ChangeResourceRecordSets(new ChangeResourceRecordSetsRequest(hostedZoneId,
-                new ChangeBatch(new List<Change> { new Change(ChangeAction.UPSERT, CreateResourceRecordSet(recordName, token)) })));
-
-            WaitChangesPropagation(response.ChangeInfo);
-        }
-
-        public override void DeleteRecord(string recordName, string token)
-        {
-            var hostedZoneId = GetHostedZoneId(recordName);
-
-            if (hostedZoneId == null)
-                return;
-
-            _log.Information($"Deleting TXT record {recordName} with value {token}");
-
-            _route53Client.ChangeResourceRecordSets(new ChangeResourceRecordSetsRequest(hostedZoneId,
-                new ChangeBatch(new List<Change> { new Change(ChangeAction.DELETE, CreateResourceRecordSet(recordName, token)) })));
-        }
-
-        private string GetHostedZoneId(string recordName)
-        {
-            var domainName = _dnsClientProvider.DomainParser.GetRegisterableDomain(recordName);
-            var response = _route53Client.ListHostedZones();
-            var hostedZone = response.HostedZones.Select(zone =>
+            try
             {
-                var fit = 0;
-                var name = zone.Name.TrimEnd('.').ToLowerInvariant();
-                if (recordName.ToLowerInvariant().EndsWith(name))
+                var recordName = record.Authority.Domain;
+                var token = record.Value;
+                var hostedZoneIds = await GetHostedZoneIds(recordName);
+                if (hostedZoneIds == null)
                 {
-                    // If there is a zone for a.b.c.com (4) and one for c.com (2)
-                    // then the former is a better (more specific) match than the 
-                    // latter, so we should use that
-                    fit = name.Split('.').Count();
+                    return false;
                 }
-                return new { zone, fit };
-            }).
-            OrderByDescending(x => x.fit).
-            FirstOrDefault();
+                _log.Information("Creating TXT record {recordName} with value {token}", recordName, token);
+                var updateTasks = hostedZoneIds.Select(hostedZoneId =>
+                    _route53Client.ChangeResourceRecordSetsAsync(
+                                   new ChangeResourceRecordSetsRequest(
+                                       hostedZoneId,
+                                       new ChangeBatch(new List<Change> {
+                                            new Change(
+                                                ChangeAction.UPSERT,
+                                                CreateResourceRecordSet(recordName, token))
+                                        }))));
+                var results = await Task.WhenAll(updateTasks);
+                var propagationTasks = results.Select(result => WaitChangesPropagation(result.ChangeInfo));
+                await Task.WhenAll(propagationTasks);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _log.Warning($"Error creating TXT record: {ex.Message}");
+                return false;
+            }
+        }
 
+        public override async Task DeleteRecord(DnsValidationRecord record)
+        {
+            var recordName = record.Authority.Domain;
+            var token = record.Value;
+            var hostedZoneIds = await GetHostedZoneIds(recordName);
+            _log.Information($"Deleting TXT record {recordName} with value {token}");
+            var deleteTasks = hostedZoneIds.Select(hostedZoneId => 
+                _route53Client.ChangeResourceRecordSetsAsync(
+                    new ChangeResourceRecordSetsRequest(hostedZoneId,
+                        new ChangeBatch(new List<Change> {
+                    new Change(
+                        ChangeAction.DELETE,
+                        CreateResourceRecordSet(recordName, token))
+                        }))));
+            _ = await Task.WhenAll(deleteTasks);
+        }
+
+        private async Task<IEnumerable<string>> GetHostedZoneIds(string recordName)
+        {
+            var hostedZones = new List<HostedZone>();
+            var response = await _route53Client.ListHostedZonesAsync();
+            hostedZones.AddRange(response.HostedZones);
+            while (response.IsTruncated)
+            {
+                response = await _route53Client.ListHostedZonesAsync(
+                    new ListHostedZonesRequest() {
+                        Marker = response.NextMarker
+                    });
+                hostedZones.AddRange(response.HostedZones);
+            }
+            _log.Debug("Found {count} hosted zones in AWS", hostedZones);
+
+            hostedZones = hostedZones.Where(x => !x.Config.PrivateZone).ToList();
+            var hostedZoneSets = hostedZones.GroupBy(x => x.Name);
+            var hostedZone = FindBestMatch(hostedZoneSets.ToDictionary(x => x.Key), recordName);
             if (hostedZone != null)
             {
-                return hostedZone.zone.Id;
+                return hostedZone.Select(x => x.Id);
             }
-
-            _log.Error($"Can't find hosted zone for domain {domainName}");
+            _log.Error($"Can't find hosted zone for domain {recordName}");
             return null;
         }
 
-        private void WaitChangesPropagation(ChangeInfo changeInfo)
+        private async Task WaitChangesPropagation(ChangeInfo changeInfo)
         {
             if (changeInfo.Status == ChangeStatus.INSYNC)
+            {
                 return;
+            }
 
             _log.Information("Waiting for DNS changes propagation");
 
             var changeRequest = new GetChangeRequest(changeInfo.Id);
 
-            while (_route53Client.GetChange(changeRequest).ChangeInfo.Status == ChangeStatus.PENDING)
-                Thread.Sleep(TimeSpan.FromSeconds(5d));
+            while ((await _route53Client.GetChangeAsync(changeRequest)).ChangeInfo.Status == ChangeStatus.PENDING)
+            {
+                await Task.Delay(2000);
+            }
         }
     }
 }

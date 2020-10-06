@@ -1,31 +1,47 @@
 ﻿using PKISharp.WACS.Clients.DNS;
+using PKISharp.WACS.Context;
 using PKISharp.WACS.Plugins.ValidationPlugins.Dreamhost;
 using PKISharp.WACS.Services;
+using System;
+using System.Threading.Tasks;
 
 namespace PKISharp.WACS.Plugins.ValidationPlugins
 {
-    internal class DreamhostDnsValidation : DnsValidation<DreamhostOptions, DreamhostDnsValidation>
+    internal class DreamhostDnsValidation : DnsValidation<DreamhostDnsValidation>
     {
         private readonly DnsManagementClient _client;
 
         public DreamhostDnsValidation(
-            LookupClientProvider dnsClient,
-            ILogService logService,  
-            DreamhostOptions options,  
-            string identifier) : 
-            base(dnsClient, logService, options, identifier)
+            LookupClientProvider dnsClient, 
+            ILogService logService, 
+            ISettingsService settings,
+            DreamhostOptions options)
+            : base(dnsClient, logService, settings) 
+            => _client = new DnsManagementClient(options.ApiKey.Value, logService);
+
+        public override async Task<bool> CreateRecord(DnsValidationRecord record)
         {
-            _client = new DnsManagementClient(options.ApiKey.Value, logService);
+            try
+            {
+                await _client.CreateRecord(record.Authority.Domain, RecordType.TXT, record.Value);
+                return true;
+            } 
+            catch
+            {
+                return false;
+            }
         }
 
-        public override void CreateRecord(string recordName, string token)
+        public override async Task DeleteRecord(DnsValidationRecord record)
         {
-            _client.CreateRecord(recordName, RecordType.TXT, token);
-        }
-
-        public override void DeleteRecord(string recordName, string token)
-        {
-            _client.DeleteRecord(recordName, RecordType.TXT, token);
+            try
+            {
+                await _client.DeleteRecord(record.Authority.Domain, RecordType.TXT, record.Value);
+            }
+            catch (Exception ex)
+            {
+                _log.Warning($"Unable to delete record from Dreamhost: {ex.Message}");
+            }
         }
     }
 }

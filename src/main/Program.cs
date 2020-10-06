@@ -1,101 +1,139 @@
 ﻿using Autofac;
-using Nager.PublicSuffix;
-using PKISharp.WACS.Acme;
 using PKISharp.WACS.Clients;
+using PKISharp.WACS.Clients.Acme;
 using PKISharp.WACS.Clients.DNS;
 using PKISharp.WACS.Clients.IIS;
 using PKISharp.WACS.Configuration;
 using PKISharp.WACS.Plugins.Resolvers;
-using PKISharp.WACS.Plugins.TargetPlugins;
 using PKISharp.WACS.Services;
 using System;
-using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
 
-namespace PKISharp.WACS
+namespace PKISharp.WACS.Host
 {
+    /// <summary>
+    /// This class serves as bootstrapper to call the main library
+    /// </summary>
     internal class Program
     {
-        private static void Main(string[] args)
+        private async static Task Main(string[] args)
         {
-            // Setup DI
-            var container = GlobalScope(args);
+            // Error handling
+            AppDomain.CurrentDomain.UnhandledException += 
+                new UnhandledExceptionEventHandler(OnUnhandledException);
 
-            // .NET Framework check
-            var dn = container.Resolve<DotNetVersionService>();
-            if (!dn.Check())
+            // Setup IOC container
+            var container = GlobalScope(args);
+            if (container == null)
             {
+                Environment.ExitCode = -1;
+                if (Environment.UserInteractive)
+                {
+                    Console.WriteLine(" Press <Enter> to close");
+                    _ = Console.ReadLine();
+                }
                 return;
             }
 
-            // Default is Tls 1.0 only, change to Tls 1.2 only
-            System.Net.ServicePointManager.SecurityProtocol = System.Net.SecurityProtocolType.Tls12;
-
-            // Uncomment the follow line to test with Fiddler
-            // System.Net.ServicePointManager.ServerCertificateValidationCallback += (sender, cert, chain, sslPolicyErrors) => true;
-
-            // Enable international character rendering
+            // The main class might change the character encoding
+            // save the original setting so that it can be restored
+            // after the run.
             var original = Console.OutputEncoding;
-            Console.OutputEncoding = System.Text.Encoding.Unicode;
 
-            // Load main instance
-            var wacs = new Wacs(container);
-            wacs.Start();
+            try
+            {
+                // Load instance of the main class and start the program
+                var wacs = container.Resolve<Wacs>(new TypedParameter(typeof(IContainer), container));
+                Environment.ExitCode = await wacs.Start();
+            } 
+            catch (Exception ex)
+            {
+                Console.WriteLine("Error in main function: " + ex.Message);
+                Environment.ExitCode = -1;
+            }
 
             // Restore original code page
             Console.OutputEncoding = original;
         }
 
+        /// <summary>
+        /// Final resort to catch unhandled exceptions and log something
+        /// before the runtime explodes.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="args"></param>
+        static void OnUnhandledException(object sender, UnhandledExceptionEventArgs args)
+        {
+            var ex = (Exception)args.ExceptionObject;
+            Console.WriteLine("Unhandled exception caught: " + ex.Message);
+        }
+
+        /// <summary>
+        /// Configure dependency injection 
+        /// </summary>
+        /// <param name="args"></param>
+        /// <returns></returns>
         internal static IContainer GlobalScope(string[] args)
         {
             var builder = new ContainerBuilder();
             var logger = new LogService();
+            if (args.Contains("--verbose"))
+            {
+                logger.SetVerbose();
+            }
             var pluginService = new PluginService(logger);
             var argumentsParser = new ArgumentsParser(logger, pluginService, args);
             var argumentsService = new ArgumentsService(logger, argumentsParser);
+            if (!argumentsService.Valid)
+            {
+                return null;
+            }
             var settingsService = new SettingsService(logger, argumentsService);
-            logger.SetDiskLoggingPath(settingsService.LogPath);
+            if (!settingsService.Valid)
+            {
+                return null;
+            }
+            logger.SetDiskLoggingPath(settingsService.Client.LogPath);
 
-            builder.RegisterInstance(argumentsService);
-            builder.RegisterInstance(argumentsParser);
-            builder.RegisterInstance(logger).As<ILogService>();
-            builder.RegisterInstance(settingsService).As<ISettingsService>();
-            builder.RegisterInstance(argumentsService).As<IArgumentsService>();
-            builder.RegisterInstance(pluginService);
-            
-            builder.RegisterType<InputService>().
-                As<IInputService>().
-                SingleInstance();
-
-            builder.RegisterType<ProxyService>().
-                SingleInstance();
-
-            builder.RegisterType<PasswordGenerator>().
-                SingleInstance();
-
-            builder.RegisterType<RenewalService>().
-               As<IRenewalService>().
-               SingleInstance();
-
-            builder.RegisterType<DotNetVersionService>().
-                SingleInstance();
+            _ = builder.RegisterInstance(argumentsService);
+            _ = builder.RegisterInstance(argumentsParser);
+            _ = builder.RegisterInstance(logger).As<ILogService>();
+            _ = builder.RegisterInstance(settingsService).As<ISettingsService>();
+            _ = builder.RegisterInstance(argumentsService).As<IArgumentsService>();
+            _ = builder.RegisterInstance(pluginService).As<IPluginService>();
+            _ = builder.RegisterType<UserRoleService>().As<IUserRoleService>().SingleInstance();
+            _ = builder.RegisterType<InputService>().As<IInputService>().SingleInstance();
+            _ = builder.RegisterType<ProxyService>().SingleInstance();
+            _ = builder.RegisterType<PasswordGenerator>().SingleInstance();
+            _ = builder.RegisterType<RenewalStoreDisk>().As<IRenewalStore>().SingleInstance();
+            _ = builder.RegisterType<VersionService>().SingleInstance();
 
             pluginService.Configure(builder);
 
-            builder.RegisterType<DomainParseService>().SingleInstance();
-            builder.RegisterType<IISClient>().As<IIISClient>().SingleInstance();
-            builder.RegisterType<IISBindingHelper>().SingleInstance();
-            builder.RegisterType<IISSiteHelper>().SingleInstance();
-            builder.RegisterType<UnattendedResolver>();
-            builder.RegisterType<InteractiveResolver>();
-            builder.RegisterType<AutofacBuilder>().SingleInstance();
-            builder.RegisterType<AcmeClient>().SingleInstance();
-            builder.RegisterType<PemService>().SingleInstance();
-            builder.RegisterType<EmailClient>().SingleInstance();
-            builder.RegisterType<LookupClientProvider>().SingleInstance();
-            builder.RegisterType<CertificateService>().As<ICertificateService>().SingleInstance();
-            builder.RegisterType<TaskSchedulerService>().SingleInstance();
-            builder.RegisterType<NotificationService>().SingleInstance();
+            _ = builder.RegisterType<DomainParseService>().SingleInstance();
+            _ = builder.RegisterType<IISClient>().As<IIISClient>().InstancePerLifetimeScope();
+            _ = builder.RegisterType<IISHelper>().SingleInstance();
+            _ = builder.RegisterType<ExceptionHandler>().SingleInstance();
+            _ = builder.RegisterType<UnattendedResolver>();
+            _ = builder.RegisterType<InteractiveResolver>();
+            _ = builder.RegisterType<AutofacBuilder>().As<IAutofacBuilder>().SingleInstance();
+            _ = builder.RegisterType<AcmeClient>().SingleInstance();
+            _ = builder.RegisterType<OrderManager>().SingleInstance();
+            _ = builder.RegisterType<PemService>().SingleInstance();
+            _ = builder.RegisterType<EmailClient>().SingleInstance();
+            _ = builder.RegisterType<ScriptClient>().SingleInstance();
+            _ = builder.RegisterType<LookupClientProvider>().SingleInstance();
+            _ = builder.RegisterType<CertificateService>().As<ICertificateService>().SingleInstance();
+            _ = builder.RegisterType<TaskSchedulerService>().SingleInstance();
+            _ = builder.RegisterType<NotificationService>().SingleInstance();
+            _ = builder.RegisterType<RenewalExecutor>().SingleInstance();
+            _ = builder.RegisterType<RenewalValidator>().SingleInstance();
+            _ = builder.RegisterType<RenewalManager>().SingleInstance();
+            _ = builder.RegisterType<RenewalCreator>().SingleInstance();
+            _ = builder.Register(c => c.Resolve<IArgumentsService>().MainArguments).SingleInstance();
 
+            _ = builder.RegisterType<Wacs>();
 
             return builder.Build();
         }

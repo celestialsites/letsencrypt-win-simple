@@ -7,9 +7,9 @@ using System.Linq;
 
 namespace PKISharp.WACS.UnitTests.Mock.Clients
 {
-    class MockIISClient : IIISClient<MockSite, MockBinding>
+    internal class MockIISClient : IIISClient<MockSite, MockBinding>
     {
-        private ILogService _log;
+        private readonly ILogService _log;
 
         public MockIISClient(ILogService log, int version = 10)
         {
@@ -91,13 +91,13 @@ namespace PKISharp.WACS.UnitTests.Mock.Clients
         IEnumerable<IIISSite> IIISClient.FtpSites => FtpSites;
         IEnumerable<IIISSite> IIISClient.WebSites => WebSites;
 
-        public IEnumerable<MockSite> FtpSites => throw new NotImplementedException();
+        public IEnumerable<MockSite> FtpSites => new List<MockSite>();
         public IEnumerable<MockSite> WebSites => MockSites;
 
         public bool HasFtpSites => FtpSites.Count() > 0;
         public bool HasWebSites => WebSites.Count() > 0;
 
-        public void AddOrUpdateBindings(IEnumerable<string> identifiers, BindingOptions bindingOptions, byte[] oldThumbprint)
+        public void AddOrUpdateBindings(IEnumerable<string> identifiers, BindingOptions bindingOptions, byte[]? oldThumbprint)
         {
             var updater = new IISHttpBindingUpdater<MockSite, MockBinding>(this, _log);
             var updated = updater.AddOrUpdateBindings(identifiers, bindingOptions, oldThumbprint);
@@ -113,18 +113,15 @@ namespace PKISharp.WACS.UnitTests.Mock.Clients
         }
         public MockSite GetFtpSite(long id) => FtpSites.First(x => id == x.Id);
         public MockSite GetWebSite(long id) => WebSites.First(x => id == x.Id);
-        public void UpdateFtpSite(long FtpSiteId, CertificateInfo newCertificate, CertificateInfo oldCertificate) { }
+        public void UpdateFtpSite(long FtpSiteId, CertificateInfo newCertificate, CertificateInfo? oldCertificate) { }
         IIISSite IIISClient.GetFtpSite(long id) => GetFtpSite(id);
         IIISSite IIISClient.GetWebSite(long id) => GetWebSite(id);
 
-        public void AddBinding(MockSite site, BindingOptions bindingOptions)
-        {
-            site.Bindings.Add(new MockBinding(bindingOptions));
-        }
+        public void AddBinding(MockSite site, BindingOptions bindingOptions) => site.Bindings.Add(new MockBinding(bindingOptions));
 
         public void UpdateBinding(MockSite site, MockBinding binding, BindingOptions bindingOptions)
         {
-            site.Bindings.Remove(binding);
+            _ = site.Bindings.Remove(binding);
             var updateOptions = bindingOptions
                 .WithHost(binding.Host)
                 .WithIP(binding.IP)
@@ -137,17 +134,17 @@ namespace PKISharp.WACS.UnitTests.Mock.Clients
         }
     }
 
-    class MockSite : IIISSite<MockBinding>
+    internal class MockSite : IIISSite<MockBinding>
     {
         IEnumerable<IIISBinding> IIISSite.Bindings => Bindings;
-        public List<MockBinding> Bindings { get; set; }
+        public List<MockBinding> Bindings { get; set; } = new List<MockBinding>();
         public long Id { get; set; }
-        public string Name { get; set; }
-        public string Path { get; set;  }
+        public string Name { get; set; } = "";
+        public string Path { get; set; } = "";
         IEnumerable<MockBinding> IIISSite<MockBinding>.Bindings => Bindings;
     }
 
-    class MockBinding : IIISBinding
+    internal class MockBinding : IIISBinding
     {
         public MockBinding() { }
         public MockBinding(BindingOptions options)
@@ -156,22 +153,33 @@ namespace PKISharp.WACS.UnitTests.Mock.Clients
             Protocol = "https";
             Port = options.Port;
             CertificateHash = options.Thumbprint;
-            CertificateStoreName = options.Store;
+            CertificateStoreName = options.Store ?? "";
             IP = options.IP;
             SSLFlags = options.Flags;
         }
 
-        public string Host { get; set; }
-        public string Protocol { get; set; }
+        public string Host { get; set; } = "";
+        public string Protocol { get; set; } = "";
         public int Port { get; set; }
-        public string IP { get; set; }
-        public byte[] CertificateHash { get; set; }
-        public string CertificateStoreName { get; set; }
-        public string BindingInformation {
-            get {
-                return $"{IP}:{Port}:{Host}";
+        public string IP { get; set; } = "";
+        public byte[]? CertificateHash { get; set; }
+        public string CertificateStoreName { get; set; } = "";
+        public string BindingInformation
+        {
+            get
+            {
+                if (_bindingInformation != null)
+                {
+                    return _bindingInformation;
+                }
+                else
+                {
+                    return $"{IP}:{Port}:{Host}";
+                }
             }
+            set => _bindingInformation = value;
         }
+        private string? _bindingInformation = null;
         public SSLFlags SSLFlags { get; set; }
     }
 }
